@@ -1,0 +1,1 @@
+{"name":"neighborEdge","path":"topology/neighborEdge","description":"Local edge index (1..3) in neighbor face","shape":[28576,3],"dtype":"uint8","computedBy":"bct.manifold.topology.neighbors"}

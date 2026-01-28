@@ -1,0 +1,1 @@
+{"format":"coo","shape":[14290,14290],"nnz":100018,"dtype":"double","name":"stiffness","path":"operator/stiffness","description":"FEM stiffness matrix (cotangent Laplacian)","variant":"cotan","sign":"positive","symmetrize":true,"precision":"double","storage":"sparse"}

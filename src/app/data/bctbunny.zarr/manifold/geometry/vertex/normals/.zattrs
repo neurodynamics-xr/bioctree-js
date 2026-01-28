@@ -1,0 +1,1 @@
+{"name":"normals","path":"geometry/vertex/normals","description":"Unit normal vectors at each vertex (area-weighted)","shape":[14290,3],"dtype":"double","units":"1","support":"vertex","normalization":"unit","computedBy":"bct.manifold.geometry.vertex.frame"}

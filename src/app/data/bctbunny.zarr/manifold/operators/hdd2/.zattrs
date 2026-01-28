@@ -1,0 +1,1 @@
+{"format":"coo","shape":[14290,14290],"nnz":14290,"dtype":"double","name":"hdd2","path":"operator/dec/hdd2","description":"Inverse Hodge star ⋆2⁻¹: dual 0-forms → primal 2-forms","storage":"sparse"}

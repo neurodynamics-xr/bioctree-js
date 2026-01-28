@@ -1,0 +1,79 @@
+@keyframes plasma-2 {
+  0%   { transform: scale(1) translate3d( 60px, 0, 0); }
+  50%  { transform: scale(2) translate3d(-60px, 0, 0); }
+  100% { transform: scale(1) translate3d( 60px, 0, 0); }
+}
+
+.plasma-2{
+  backface-visibility: hidden;
+  position: relative;
+  overflow: hidden;
+  border-radius: 50%;
+  width: 140px;
+  height: 140px;
+  padding: 0;
+  box-shadow: 0 0 30px 0 #00ddff inset;
+}
+
+.plasma-2 .gooey-container{
+  overflow: hidden;
+  border-radius: 50%;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  filter: url(#gooey-plasma-2);
+  width: 180px;
+  height: 180px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  box-shadow: 0 0 0 20px #0099ff inset;
+}
+
+.plasma-2 .bubble{
+  display: block;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 100%;
+  text-align: right;
+  transform: translate(-50%, -50%);
+}
+
+.plasma-2 .bubble::before{
+  content: "";
+  display: inline-block;
+  background: #4081ff;
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  transform: scale(1) translate3d(75px, 0, 0);
+  box-shadow:
+    0 0 10px 5px #00ffff inset,
+    0 0 10px 0 #81ff00 inset;
+}
+
+/* rotations (SCSS @for expanded) */
+.plasma-2 .bubble:nth-child(1){ transform: translate(-50%, -50%) rotate(60deg);  }
+.plasma-2 .bubble:nth-child(2){ transform: translate(-50%, -50%) rotate(120deg); }
+.plasma-2 .bubble:nth-child(3){ transform: translate(-50%, -50%) rotate(180deg); }
+.plasma-2 .bubble:nth-child(4){ transform: translate(-50%, -50%) rotate(240deg); }
+.plasma-2 .bubble:nth-child(5){ transform: translate(-50%, -50%) rotate(300deg); }
+.plasma-2 .bubble:nth-child(6){ transform: translate(-50%, -50%) rotate(360deg); }
+
+/* animations (SCSS timing expanded) */
+.plasma-2 .bubble:nth-child(1)::before{ animation: plasma-2 2.5s  ease 0.5s       infinite; }
+.plasma-2 .bubble:nth-child(2)::before{ animation: plasma-2 5s    ease 0.25s      infinite; }
+.plasma-2 .bubble:nth-child(3)::before{ animation: plasma-2 7.5s  ease 0.1666667s infinite; }
+.plasma-2 .bubble:nth-child(4)::before{ animation: plasma-2 10s   ease 0.125s     infinite; }
+.plasma-2 .bubble:nth-child(5)::before{ animation: plasma-2 12.5s ease 0.1s       infinite; }
+.plasma-2 .bubble:nth-child(6)::before{ animation: plasma-2 15s   ease 0.0833333s infinite; }
+
+.loader-text {
+  color: #eaeaea;
+  font-size: 16px;
+  font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
+  margin-top: 24px;
+  text-align: center;
+}

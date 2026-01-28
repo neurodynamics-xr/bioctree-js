@@ -1,0 +1,1 @@
+{"name":"tangent2","path":"geometry/vertex/tangent2","description":"Second tangent vectors (unit, orthogonal to normals and tangent1)","shape":[14290,3],"dtype":"double","units":"1","support":"vertex","normalization":"unit","computedBy":"bct.manifold.geometry.vertex.frame"}

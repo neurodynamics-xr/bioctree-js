@@ -1,0 +1,1 @@
+{"name":"cotan","path":"geometry/face/cotan","description":"Cotangent weights per face vertex","shape":[28576,3],"dtype":"double","units":"1","support":"face","computedBy":"bct.manifold.geometry.face.cotan"}

@@ -1,0 +1,1 @@
+{"name":"face","path":"topology/face","description":"Incident face index for each halfedge","shape":[85728,1],"dtype":"uint32","computedBy":"bct.manifold.topology.faces"}

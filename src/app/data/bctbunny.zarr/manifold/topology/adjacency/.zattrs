@@ -1,0 +1,1 @@
+{"format":"coo","shape":[14290,14290],"nnz":85728,"dtype":"logical","name":"adjacency","path":"topology/adjacency","description":"Sparse binary adjacency matrix","computedBy":"bct.manifold.topology.adjacency"}

@@ -1,0 +1,1 @@
+{"name":"tangent1","path":"geometry/vertex/tangent1","description":"First tangent vectors (unit, orthogonal to normals)","shape":[14290,3],"dtype":"double","units":"1","support":"vertex","normalization":"unit","computedBy":"bct.manifold.geometry.vertex.frame"}

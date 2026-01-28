@@ -1,0 +1,1 @@
+{"name":"headVertex","path":"topology/headVertex","description":"Head vertex index of each halfedge","shape":[85728,1],"dtype":"uint32","computedBy":"bct.manifold.topology.vertices"}

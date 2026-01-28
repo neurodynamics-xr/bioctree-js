@@ -1,0 +1,10 @@
+{
+  "description": "Test scalar field: Sine wave pattern",
+  "type": "scalar",
+  "vertexCount": 163842,
+  "range": [
+    0,
+    1
+  ],
+  "data": "sine_wave_163842.bin"
+}

@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>three.js webgpu - surface particles (2 fixed face attractors)</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0" />
+    <style>
+      body { margin: 0; overflow: hidden; background: #000; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+      #info {
+        position: absolute; left: 12px; top: 12px; color: #ddd; font-size: 13px; line-height: 1.35;
+        background: rgba(0,0,0,0.45); padding: 10px 12px; border-radius: 10px; max-width: 560px;
+      }
+      #info code { color: #fff; }
+    </style>
+  </head>
+  <body>
+    <div id="info">
+      <div><b>Surface Attractor Particles</b> (WebGPU + TSL)</div>
+      <div>Two fixed attractors on surface: <code>FACE_A → FACE_B</code> (hardcoded face IDs).</div>
+      <div>Loads: <code>data/threejs/particle_vis.json</code> + <code>.bin</code></div>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "../build/three.webgpu.js",
+          "three/webgpu": "../build/three.webgpu.js",
+          "three/tsl": "../build/three.tsl.js",
+          "three/addons/": "./jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from 'three/webgpu';
+      import {
+        Fn, If, Loop,
+        float, uint,
+        vec2, vec3, vec4,
+        instancedArray, instanceIndex,
+        uniform, color,
+        hash, mix
+      } from 'three/tsl';
+
+      import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+      import { Inspector } from 'three/addons/inspector/Inspector.js';
+      import { storage } from 'three/tsl';
+
+      // ------------------------------------------------------------
+      // CONFIG (simplified)
+      // ------------------------------------------------------------
+      const DATA_BASE = './data/threejs/particle_vis'; // .json + .bin
+
+      // Hardcoded faces (A = source / spawn face, B = target face).
+      // FACE_B will be clamped to nF-1 at runtime.
+      const FACE_A = 0;
+      const FACE_B_DEFAULT = 2000;
+
+      const COUNT = Math.pow(2, 17);         // reduce if needed (131072)
+      const FIXED_DT = 1 / 60;               // fixed timestep (like the example)
+      const MAX_EDGE_HOPS = 3;               // keep small for simplicity & stability
+
+      // “Physics” constants (tune if needed)
+      const ATTRACT_GAIN = 2.0;              // attraction strength toward B
+      const REPEL_GAIN = 0.5;                // repulsion away from A
+      const MAX_SPEED = 6.0;
+      const DAMPING = 0.10;                  // like example velocityDamping ~0.1
+      const PARTICLE_SCALE = 0.008;          // like example scale ~0.008
+
+      // ------------------------------------------------------------
+      // Scene
+      // ------------------------------------------------------------
+      let camera, scene, renderer, controls;
+      let updateCompute;
+
+      init();
+
+      async function init() {
+        camera = new THREE.PerspectiveCamera(25, window.innerWidth / window.innerHeight, 0.01, 500);
+        camera.position.set(3, 5, 8);
+
+        scene = new THREE.Scene();
+
+        scene.add(new THREE.AmbientLight('#ffffff', 0.5));
+        const dir = new THREE.DirectionalLight('#ffffff', 1.5);
+        dir.position.set(4, 2, 0);
+        scene.add(dir);
+
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor('#000000');
+        renderer.inspector = new Inspector();
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.minDistance = 0.05;
+        controls.maxDistance = 200;
+
+        window.addEventListener('resize', onWindowResize);
+
+        // Load exported mesh + aux buffers
+        const exportData = await loadExportForThreeJS(DATA_BASE);
+        const { nV, nF } = exportData.counts;
+
+        // Clamp FACE_B to a valid face
+        const FACE_B = Math.min(FACE_B_DEFAULT, nF - 1);
+
+        // Build and add surface mesh for visualization
+        const surface = buildSurfaceMesh(exportData);
+        scene.add(surface);
+        fitCameraToObject(camera, surface, controls);
+
+        // Create GPU storage nodes (for compute + render reconstruction)
+        const gpu = createStorageNodes(exportData);
+
+        // Choose two fixed attractor points ON the mesh: centroids of FACE_A and FACE_B.
+        // Requires centroids in export; if not present, we fall back to computing from V/F on CPU.
+        const attractorA = getFacePoint(exportData, FACE_A);
+        const attractorB = getFacePoint(exportData, FACE_B);
+
+        // Create particles system (very close to original example style, but surface constrained)
+        updateCompute = createSurfaceParticles({
+          gpu,
+          nF,
+          faceA: FACE_A,
+          faceB: FACE_B,
+          attractorA,
+          attractorB
+        });
+
+        renderer.setAnimationLoop(animate);
+      }
+
+      // ------------------------------------------------------------
+      // Loader: exportForThreeJS JSON + BIN
+      // ------------------------------------------------------------
+      async function loadExportForThreeJS(basePath) {
+        const json = await (await fetch(basePath + '.json')).json();
+        const bin = await (await fetch(basePath + '.bin')).arrayBuffer();
+
+        const dtypeToCtor = (dtype) => {
+          switch (dtype) {
+            case 'float32': return Float32Array;
+            case 'uint32': return Uint32Array;
+            case 'int32': return Int32Array;
+            case 'uint8': return Uint8Array;
+            default: throw new Error(`Unsupported dtype: ${dtype}`);
+          }
+        };
+
+        const buffers = {};
+        for (const entry of json.buffers) {
+          const Ctor = dtypeToCtor(entry.dtype);
+          buffers[entry.name] = new Ctor(bin, entry.byteOffset, entry.count);
+        }
+
+        // Make a u32 view for neighbors (treat -1 sentinel as 0xFFFFFFFF)
+        if (buffers.faceNeighbors instanceof Int32Array) {
+          buffers.faceNeighborsU32 = new Uint32Array(
+            buffers.faceNeighbors.buffer,
+            buffers.faceNeighbors.byteOffset,
+            buffers.faceNeighbors.length
+          );
+        } else {
+          buffers.faceNeighborsU32 = buffers.faceNeighbors;
+        }
+
+        // Minimal requirements
+        const required = ['V', 'F', 'faceNormals', 'faceNeighborsU32'];
+        for (const k of required) {
+          if (!buffers[k]) throw new Error(`Missing required buffer: ${k}`);
+        }
+
+        return {
+          counts: { nV: json.nV, nF: json.nF },
+          buffers
+        };
+      }
+
+      // ------------------------------------------------------------
+      // Mesh display
+      // ------------------------------------------------------------
+      function buildSurfaceMesh(exportData) {
+        const { buffers } = exportData;
+
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(buffers.V, 3));
+        geom.setIndex(new THREE.BufferAttribute(buffers.F, 1));
+        geom.computeVertexNormals();
+
+        const mat = new THREE.MeshStandardMaterial({
+          color: 0x111111,
+          roughness: 0.9,
+          metalness: 0.0,
+          side: THREE.DoubleSide
+        });
+
+        const mesh = new THREE.Mesh(geom, mat);
+        mesh.name = 'SurfaceMesh';
+        return mesh;
+      }
+
+      function fitCameraToObject(camera, object, orbitControls) {
+        object.updateWorldMatrix(true, true);
+        const box = new THREE.Box3().setFromObject(object);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+
+        const maxSize = Math.max(size.x, size.y, size.z);
+        const fitHeightDistance = maxSize / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)));
+        const fitWidthDistance = fitHeightDistance / camera.aspect;
+        const distance = 1.25 * Math.max(fitHeightDistance, fitWidthDistance);
+
+        camera.position.copy(center).add(new THREE.Vector3(0, 0, distance));
+        camera.near = distance / 100;
+        camera.far = distance * 100;
+        camera.updateProjectionMatrix();
+
+        orbitControls.target.copy(center);
+        orbitControls.update();
+      }
+
+      // ------------------------------------------------------------
+      // GPU storage nodes
+      // ------------------------------------------------------------
+      function createStorageNodes(exportData) {
+        const { nV, nF } = exportData.counts;
+        const b = exportData.buffers;
+
+        // Storage buffers
+        const VAttr = new THREE.StorageBufferAttribute(b.V, 3);
+        const FAttr = new THREE.StorageBufferAttribute(b.F, 3);
+        const nFAttr = new THREE.StorageBufferAttribute(b.faceNormals, 3);
+        const nbAttr = new THREE.StorageBufferAttribute(b.faceNeighborsU32, 3);
+
+        const VStorage = storage(VAttr, 'vec3', nV).toVar('VStorage');
+        const FStorage = storage(FAttr, 'uvec3', nF).toVar('FStorage');
+        const nFStorage = storage(nFAttr, 'vec3', nF).toVar('nFStorage');
+        const neighborsStorage = storage(nbAttr, 'uvec3', nF).toVar('neighborsStorage');
+
+        return { VStorage, FStorage, nFStorage, neighborsStorage };
+      }
+
+      // ------------------------------------------------------------
+      // Attractor point selection (CPU)
+      // ------------------------------------------------------------
+      function getFacePoint(exportData, faceId) {
+        const { buffers } = exportData;
+        // Prefer centroids if exported
+        if (buffers.centroids) {
+          const i = faceId * 3;
+          return new THREE.Vector3(buffers.centroids[i], buffers.centroids[i+1], buffers.centroids[i+2]);
+        }
+
+        // Fallback: compute centroid from V/F on CPU
+        const idx0 = buffers.F[faceId * 3 + 0];
+        const idx1 = buffers.F[faceId * 3 + 1];
+        const idx2 = buffers.F[faceId * 3 + 2];
+
+        const a = new THREE.Vector3(
+          buffers.V[idx0*3+0], buffers.V[idx0*3+1], buffers.V[idx0*3+2]
+        );
+        const b = new THREE.Vector3(
+          buffers.V[idx1*3+0], buffers.V[idx1*3+1], buffers.V[idx1*3+2]
+        );
+        const c = new THREE.Vector3(
+          buffers.V[idx2*3+0], buffers.V[idx2*3+1], buffers.V[idx2*3+2]
+        );
+
+        return a.add(b).add(c).multiplyScalar(1/3);
+      }
+
+      // ------------------------------------------------------------
+      // Particles (surface constrained, simplified)
+      // ------------------------------------------------------------
+      function createSurfaceParticles({ gpu, nF, faceA, faceB, attractorA, attractorB }) {
+        const { VStorage, FStorage, nFStorage, neighborsStorage } = gpu;
+
+        // Keep the same style choices as the original example:
+        const material = new THREE.SpriteNodeMaterial({
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        });
+
+        const maxSpeed = uniform(MAX_SPEED);
+        const velocityDamping = uniform(DAMPING);
+        const scale = uniform(PARTICLE_SCALE);
+        const colorA = uniform(color('#5900ff'));
+        const colorB = uniform(color('#ffa575'));
+
+        // Fixed dt like the example (for stable, reproducible result)
+        const dt = float(FIXED_DT);
+
+        // Fixed attractors (uniform vec3)
+        const Apos = uniform(attractorA);
+        const Bpos = uniform(attractorB);
+
+        // Particle state:
+        // - faceId: uint
+        // - bary: vec3
+        // - velocity: vec3 (3D; always projected to face tangent plane)
+        const faceIdBuffer = instancedArray(COUNT, 'uint');
+        const baryBuffer = instancedArray(COUNT, 'vec3');
+        const velocityBuffer = instancedArray(COUNT, 'vec3');
+
+        // Random barycentric inside a face (same folding trick as earlier)
+        const randomBarycentric = Fn(([seed]) => {
+          const u = hash(seed.add(uint(0x1234))).toVar();
+          const v = hash(seed.add(uint(0x5678))).toVar();
+
+          const uu = u.toVar();
+          const vv = v.toVar();
+
+          If(uu.add(vv).greaterThan(1.0), () => {
+            uu.assign(uu.oneMinus());
+            vv.assign(vv.oneMinus());
+          });
+
+          const b0 = uu.oneMinus().sub(vv);
+          const b1 = uu;
+          const b2 = vv;
+          return vec3(b0, b1, b2);
+        });
+
+        // Reconstruct 3D position from (faceId, bary)
+        const faceBaryToPos = Fn(([fId, bary]) => {
+          const tri = FStorage.element(fId);      // uvec3
+          const a = VStorage.element(tri.x);
+          const b = VStorage.element(tri.y);
+          const c = VStorage.element(tri.z);
+          return a.mul(bary.x).add(b.mul(bary.y)).add(c.mul(bary.z));
+        });
+
+        // Point -> barycentric in face plane
+        const pointToBary = Fn(([fId, p]) => {
+          const tri = FStorage.element(fId);
+          const a = VStorage.element(tri.x);
+          const b = VStorage.element(tri.y);
+          const c = VStorage.element(tri.z);
+
+          const v0 = b.sub(a);
+          const v1 = c.sub(a);
+          const v2 = p.sub(a);
+
+          const d00 = v0.dot(v0);
+          const d01 = v0.dot(v1);
+          const d11 = v1.dot(v1);
+          const d20 = v2.dot(v0);
+          const d21 = v2.dot(v1);
+
+          const denom = d00.mul(d11).sub(d01.mul(d01));
+          const v = d11.mul(d20).sub(d01.mul(d21)).div(denom);
+          const w = d00.mul(d21).sub(d01.mul(d20)).div(denom);
+          const u = float(1.0).sub(v).sub(w);
+
+          return vec3(u, v, w);
+        });
+
+        // Choose edge index by most negative bary component:
+        // bary.x < 0 => crossed edge opposite vertex 0 => neighbor slot 0, etc.
+        const pickEdgeIndex = Fn(([bary]) => {
+          const bx = bary.x.toVar();
+          const by = bary.y.toVar();
+          const bz = bary.z.toVar();
+
+          const edge = uint(0).toVar();
+
+          If(by.lessThan(bx).and(by.lessThan(bz)), () => edge.assign(uint(1)));
+          If(bz.lessThan(bx).and(bz.lessThan(by)), () => edge.assign(uint(2)));
+
+          return edge;
+        });
+
+        const getNeighborFace = Fn(([fId, edgeIndex]) => {
+          const nb = neighborsStorage.element(fId); // uvec3
+          const out = uint(0xffffffff).toVar();     // boundary sentinel
+          If(edgeIndex.equal(uint(0)), () => out.assign(nb.x));
+          If(edgeIndex.equal(uint(1)), () => out.assign(nb.y));
+          If(edgeIndex.equal(uint(2)), () => out.assign(nb.z));
+          return out;
+        });
+
+        // Init compute: spawn on faceA
+        const init = Fn(() => {
+          const fId = faceIdBuffer.element(instanceIndex);
+          const bary = baryBuffer.element(instanceIndex);
+          const vel = velocityBuffer.element(instanceIndex);
+
+          fId.assign(uint(faceA));
+          bary.assign(randomBarycentric(instanceIndex));
+
+          // small random initial velocity (will be projected anyway)
+          const r0 = hash(instanceIndex.add(uint(Math.random() * 0xffffff))).sub(0.5);
+          const r1 = hash(instanceIndex.add(uint(Math.random() * 0xffffff))).sub(0.5);
+          const r2 = hash(instanceIndex.add(uint(Math.random() * 0xffffff))).sub(0.5);
+          vel.assign(vec3(r0, r1, r2).mul(0.02));
+        });
+
+        const initCompute = init().compute(COUNT);
+
+        const reset = () => renderer.compute(initCompute);
+        reset();
+
+        // Update compute: attract to B, repel from A, project to tangent, hop faces
+        const update = Fn(() => {
+          const fId = faceIdBuffer.element(instanceIndex);
+          const bary = baryBuffer.element(instanceIndex);
+          const vel = velocityBuffer.element(instanceIndex);
+
+          const pos = faceBaryToPos(fId, bary).toVar();
+          const n = nFStorage.element(fId).normalize().toVar();
+
+          // ----- Force (two fixed points; no rotation axes)
+          const toB = Bpos.sub(pos);
+          const dB = toB.length().add(1e-6);
+          const dirB = toB.div(dB);
+
+          const fromA = pos.sub(Apos);
+          const dA = fromA.length().add(1e-6);
+          const dirA = fromA.div(dA);
+
+          // Simple inverse-square style scaling (but with tunable gains)
+          const fAttract = dirB.mul(float(ATTRACT_GAIN).div(dB.mul(dB)));
+          const fRepel = dirA.mul(float(REPEL_GAIN).div(dA.mul(dA)));
+
+          // total force in 3D
+          const force3 = fAttract.add(fRepel);
+
+          // project force to tangent plane of current face
+          const forceTan = force3.sub(n.mul(force3.dot(n)));
+
+          // update velocity
+          vel.addAssign(forceTan.mul(dt));
+
+          // clamp speed (same idea as original example)
+          const speed = vel.length().toVar();
+          If(speed.greaterThan(maxSpeed), () => {
+            vel.assign(vel.div(speed).mul(maxSpeed));
+          });
+
+          // damping (same style as original)
+          vel.mulAssign(velocityDamping.oneMinus());
+
+          // propose new position
+          const pNext = pos.add(vel.mul(dt)).toVar();
+
+          // compute bary in current face
+          bary.assign(pointToBary(fId, pNext));
+
+          // edge hop loop (very small cap)
+          Loop(uint(MAX_EDGE_HOPS), () => {
+            const outside =
+              bary.x.lessThan(0.0)
+                .or(bary.y.lessThan(0.0))
+                .or(bary.z.lessThan(0.0));
+
+            If(outside, () => {
+              const edgeIndex = pickEdgeIndex(bary);
+              const nbFace = getNeighborFace(fId, edgeIndex).toVar();
+
+              // boundary => respawn on faceA
+              If(nbFace.equal(uint(0xffffffff)), () => {
+                fId.assign(uint(faceA));
+                bary.assign(randomBarycentric(instanceIndex.add(uint(1337))));
+                vel.assign(vec3(0.0, 0.0, 0.0));
+              });
+
+              // valid neighbor => hop face and recompute bary
+              If(nbFace.notEqual(uint(0xffffffff)), () => {
+                fId.assign(nbFace);
+                bary.assign(pointToBary(fId, pNext));
+
+                // re-project velocity to new face tangent plane (simple, avoids transport2x2)
+                const n2 = nFStorage.element(fId).normalize();
+                vel.assign(vel.sub(n2.mul(vel.dot(n2))));
+              });
+            });
+          });
+
+          // Optional: if particle gets very near B, respawn at A (keeps flow continuous)
+          const distToB = Bpos.sub(faceBaryToPos(fId, bary)).length();
+          If(distToB.lessThan(0.03), () => {
+            fId.assign(uint(faceA));
+            bary.assign(randomBarycentric(instanceIndex.add(uint(4242))));
+            vel.assign(vec3(0.0, 0.0, 0.0));
+          });
+        });
+
+        const updateCompute = update().compute(COUNT).setName('Update Surface Particles');
+
+        // Rendering nodes (match original example style)
+        material.positionNode = Fn(() => {
+          const fIdAttr = faceIdBuffer.toAttribute();  // uint attribute
+          const baryAttr = baryBuffer.toAttribute();   // vec3 attribute
+          return faceBaryToPos(fIdAttr, baryAttr);
+        })();
+
+        material.colorNode = Fn(() => {
+          const v = velocityBuffer.toAttribute();
+          const s = v.length();
+          // EXACT same style as original: smoothstep(0, 0.5) then mix colorA/colorB
+          const mixv = s.div(maxSpeed).smoothstep(0.0, 0.5);
+          const finalColor = mix(colorA, colorB, mixv);
+          return vec4(finalColor, 1.0);
+        })();
+
+        // Scale: use a small random per-particle multiplier (same idea as original)
+        const massMul = hash(instanceIndex.add(uint(Math.random() * 0xffffff))).remap(0.25, 1.0).toVar();
+        material.scaleNode = massMul.mul(scale);
+
+        const geom = new THREE.PlaneGeometry(1, 1);
+        const inst = new THREE.InstancedMesh(geom, material, COUNT);
+        inst.frustumCulled = false;
+        scene.add(inst);
+
+        // Add small spheres to show attractor locations (optional visual aid)
+        const sphereMatA = new THREE.MeshBasicMaterial({ color: 0x00ffcc });
+        const sphereMatB = new THREE.MeshBasicMaterial({ color: 0xffcc00 });
+        const sphGeom = new THREE.SphereGeometry(0.03, 16, 16);
+        const sA = new THREE.Mesh(sphGeom, sphereMatA);
+        const sB = new THREE.Mesh(sphGeom, sphereMatB);
+        sA.position.copy(attractorA);
+        sB.position.copy(attractorB);
+        scene.add(sA);
+        scene.add(sB);
+
+        // GUI controls for particle parameters
+        const gui = renderer.inspector.createParameters('Particle Parameters');
+        
+        gui.add(maxSpeed, 'value', 0, 15, 0.1).name('maxSpeed');
+        gui.add(velocityDamping, 'value', 0, 0.5, 0.01).name('damping');
+        gui.add(scale, 'value', 0, 0.05, 0.001).name('particleScale');
+        gui.addColor({ color: colorA.value.getHexString(THREE.SRGBColorSpace) }, 'color').name('colorA').onChange(value => colorA.value.set(value));
+        gui.addColor({ color: colorB.value.getHexString(THREE.SRGBColorSpace) }, 'color').name('colorB').onChange(value => colorB.value.set(value));
+        
+        gui.add({ attractorVisible: sA.visible }, 'attractorVisible').onChange(value => {
+          sA.visible = value;
+          sB.visible = value;
+        });
+        
+        gui.add({ meshVisible: surfaceMesh.visible }, 'meshVisible').onChange(value => {
+          surfaceMesh.visible = value;
+        });
+        
+        gui.add({ reset }, 'reset');
+
+        // Expose reset for quick recovery if needed
+        window.resetParticles = reset;
+
+        return updateCompute;
+      }
+
+      // ------------------------------------------------------------
+      // Animation
+      // ------------------------------------------------------------
+      function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      function animate() {
+        controls.update();
+        renderer.compute(updateCompute);
+        renderer.render(scene, camera);
+      }
+    </script>
+  </body>
+</html>
+r

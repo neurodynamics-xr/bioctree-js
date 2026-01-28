@@ -1,0 +1,1 @@
+{"schema":"bct.manifold.topology@1.0.0","package":"bct.manifold.topology","numVertices":14290,"numFaces":28576,"numHalfedges":85728,"numEdges":42864,"convention":"CCW orientation: h12->h23->h31->h12","boundary_convention":"twin=0 for boundary halfedges","computed_utc":"2026-01-23T01:35:22Z"}

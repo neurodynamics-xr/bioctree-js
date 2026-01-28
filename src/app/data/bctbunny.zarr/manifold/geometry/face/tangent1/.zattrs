@@ -1,0 +1,1 @@
+{"name":"tangent1","path":"geometry/face/tangent1","description":"First tangent vectors (unit)","shape":[28576,3],"dtype":"double","units":"1","support":"face","normalization":"unit","computedBy":"bct.manifold.geometry.face.frame"}

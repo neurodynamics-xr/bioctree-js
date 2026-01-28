@@ -1,0 +1,1 @@
+{"name":"normals","path":"geometry/face/normals","description":"Face normal vectors (unit)","shape":[28576,3],"dtype":"double","units":"1","support":"face","normalization":"unit","computedBy":"bct.manifold.geometry.face.frame"}

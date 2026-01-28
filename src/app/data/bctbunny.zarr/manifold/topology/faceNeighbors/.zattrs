@@ -1,0 +1,1 @@
+{"name":"faceNeighbors","path":"topology/faceNeighbors","description":"Adjacent face indices (-1 for boundary)","shape":[28576,3],"dtype":"int32","computedBy":"bct.manifold.topology.neighbors"}

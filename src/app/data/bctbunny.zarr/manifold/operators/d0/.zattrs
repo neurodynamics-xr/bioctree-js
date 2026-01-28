@@ -1,0 +1,1 @@
+{"format":"coo","shape":[42864,14290],"nnz":85728,"dtype":"double","name":"d0","path":"operator/dec/d0","description":"Exterior derivative d0: 0-forms → 1-forms (vertex → edge)","storage":"sparse"}

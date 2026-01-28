@@ -1,0 +1,1 @@
+{"error":"MATLAB:unassignedOutputs","message":"Output argument \"edgeLengths\" (and possibly others) not assigned a value in the execution with \"bct.manifold.geometry.dual.edgeLengths\" function."}

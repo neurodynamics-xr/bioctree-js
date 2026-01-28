@@ -1,0 +1,1 @@
+{"name":"twin","path":"topology/twin","description":"Opposite halfedge across undirected edge (0 if boundary)","shape":[85728,1],"dtype":"uint32","computedBy":"bct.manifold.topology.twins"}

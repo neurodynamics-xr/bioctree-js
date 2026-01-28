@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Three Mesh Viewer</title>
+  <link rel="stylesheet" href="./styles.css" />
+
+  <!-- Import map: match official three.js pattern (three + three/addons) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three/build/three.module.js",
+      "three/addons/": "./vendor/three/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+
+<body>
+  <div id="root">
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <!-- MATLAB Bridge: setup function for uihtml communication -->
+  <script type="module">
+    import { initViewer, setMeshFromData, setScalarData, clearMesh } from "./render.js";
+
+    // Global setup function for MATLAB uihtml component
+    window.setup = function(htmlComponent) {
+      try {
+        // Get DOM elements
+        const canvas = document.getElementById('canvas');
+        
+        // Initialize viewer without loading a mesh
+        initViewer({ canvasEl: canvas, glbUrl: null })
+          .catch((err) => {
+            console.error('[MATLAB Bridge] Viewer initialization failed:', err);
+            console.error('[MATLAB Bridge] Stack:', err.stack);
+          });
+
+        // Listen for data changes from MATLAB
+        htmlComponent.addEventListener("DataChanged", (event) => {
+          try {
+            const data = htmlComponent.Data;
+
+            // Check if clearMesh is requested
+            if (data && data.clearMesh) {
+              clearMesh();
+              return;
+            }
+
+            // Check if mesh data is present
+            if (data && data.mesh) {
+              setMeshFromData(data.mesh);
+            }
+            
+            // Check if scalar data is present
+            if (data && data.scalar) {
+              setScalarData(data.scalar);
+            }
+          } catch (err) {
+            console.error('[MATLAB Bridge] DataChanged handler error:', err);
+            console.error('[MATLAB Bridge] Stack:', err.stack);
+          }
+        });
+      } catch (err) {
+        console.error('[MATLAB Bridge] Setup error:', err);
+        console.error('[MATLAB Bridge] Stack:', err.stack);
+      }
+    };
+  </script>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

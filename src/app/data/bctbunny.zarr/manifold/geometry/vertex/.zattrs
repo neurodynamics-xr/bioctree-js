@@ -1,0 +1,1 @@
+{"schema":"bct.manifold.geometry.vertex@1.0.0","package":"bct.manifold.geometry.vertex","frame_handedness":"right-handed","frame_convention":"tangent2 = normal × tangent1","normal_weighting":"area-weighted","tangent_method":"reference_axis_projection","computation_method":"surfaceMesh","computed_utc":"2026-01-23T01:35:25Z"}

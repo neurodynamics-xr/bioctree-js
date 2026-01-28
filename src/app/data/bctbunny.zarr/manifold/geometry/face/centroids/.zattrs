@@ -1,0 +1,1 @@
+{"name":"centroids","path":"geometry/face/centroids","description":"Centroid (barycenter) of each triangular face","shape":[28576,3],"dtype":"double","units":"m","support":"face","computedBy":"bct.manifold.geometry.face.centroids"}

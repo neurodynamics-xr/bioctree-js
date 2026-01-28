@@ -1,0 +1,1 @@
+{"name":"faceHalfedges","path":"topology/faceHalfedges","description":"Halfedge indices per face [h12 h23 h31]","shape":[28576,3],"dtype":"uint32","computedBy":"bct.manifold.topology.faceHalfedges"}

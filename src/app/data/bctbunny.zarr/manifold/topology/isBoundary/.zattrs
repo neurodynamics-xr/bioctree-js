@@ -1,0 +1,1 @@
+{"name":"isBoundary","path":"topology/isBoundary","description":"Boundary flag (true if twin=0)","shape":[85728,1],"dtype":"logical","computedBy":"derived"}

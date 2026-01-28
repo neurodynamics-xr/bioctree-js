@@ -1,0 +1,1 @@
+{"name":"circumcenters","path":"geometry/face/circumcenters","description":"Circumcenter of each triangular face","shape":[28576,3],"dtype":"double","units":"m","support":"face","computedBy":"bct.manifold.geometry.face.circumcenters"}

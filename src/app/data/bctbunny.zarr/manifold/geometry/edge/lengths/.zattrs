@@ -1,0 +1,1 @@
+{"name":"lengths","path":"geometry/edge/lengths","description":"Euclidean length of each edge","shape":[42864,1],"dtype":"double","units":"m","support":"edge","computedBy":"bct.manifold.geometry.edge.lengths"}

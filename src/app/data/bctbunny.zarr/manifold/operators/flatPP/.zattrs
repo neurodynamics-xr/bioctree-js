@@ -1,0 +1,1 @@
+{"format":"coo","shape":[42864,42870],"nnz":257182,"dtype":"double","name":"flatPP","path":"operator/dec/flatPP","description":"Flat ♭: primal vectors → primal 1-forms","storage":"sparse"}

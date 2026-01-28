@@ -1,0 +1,1 @@
+{"schema":"bct.manifold.operator@1.0.0","package":"bct.manifold.operator","numVertices":14290,"numFaces":28576,"numEdges":1,"massVariant":"voronoi","stiffnessVariant":"cotan","stiffnessSign":"positive","sparseFormat":"coo","decMethod":"DECLab","decBackend":"DiscreteExteriorCalculus","hasDEC":true}

@@ -1,0 +1,1 @@
+{"format":"coo","shape":[14290,14290],"nnz":14290,"dtype":"double","name":"hd0","path":"operator/dec/hd0","description":"Hodge star ⋆0: primal 0-forms → dual 2-forms","storage":"sparse"}

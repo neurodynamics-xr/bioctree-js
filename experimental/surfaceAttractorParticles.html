@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>three.js webgpu - surface attractor particles (exportForThreeJS)</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0" />
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #info {
+      position: absolute; left: 12px; top: 12px; color: #ddd; font-size: 13px; line-height: 1.3;
+      background: rgba(0,0,0,0.4); padding: 10px 12px; border-radius: 10px; max-width: 520px;
+    }
+    #info b { color: #fff; }
+    #info .row { margin-top: 6px; }
+  </style>
+</head>
+<body>
+<div id="info">
+  <div><b>Surface Attractor Particles</b> (WebGPU + TSL compute)</div>
+  <div class="row">Loads: <code>data/threejs/particle_vis.json</code> + <code>.bin</code></div>
+  <div class="row">Particles are constrained to the triangulated surface via <code>(faceId, barycentric)</code> integration + edge crossing.</div>
+  <div class="row">Controls: Orbit to inspect; TransformControls to move/rotate attractors.</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "../build/three.webgpu.js",
+    "three/webgpu": "../build/three.webgpu.js",
+    "three/tsl": "../build/three.tsl.js",
+    "three/addons/": "./jsm/"
+  }
+}
+</script>
+
+<script type="module">
+  import * as THREE from 'three/webgpu';
+  import {
+    // types + control flow
+    Fn, If, Loop,
+    // scalars / vectors
+    float, int, uint, vec2, vec3, vec4,
+    // misc
+    PI, color, cos, sin, mix, mod,
+    // per-instance
+    instanceIndex, instancedArray,
+    // uniforms
+    uniform, uniformArray,
+    // hashing
+    hash,
+    // storage access
+    storage
+  } from 'three/tsl';
+
+  import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import { TransformControls } from 'three/addons/controls/TransformControls.js';
+  import { Inspector } from 'three/addons/inspector/Inspector.js';
+
+  // -----------------------------
+  // Config
+  // -----------------------------
+  const DATA_BASE = './data/threejs/particle_vis'; // expects .json + .bin
+  const PARTICLE_COUNT = Math.pow( 2, 18 );        // 262k; reduce if needed
+  const MAX_EDGE_HOPS_PER_STEP = 4;                // safety loop cap
+  const FIXED_DELTA = 1 / 60;                      // stable demo timestep
+
+  // -----------------------------
+  // Globals
+  // -----------------------------
+  let camera, scene, renderer, controls;
+  let updateCompute;
+
+  // mesh buffers (GPU storage)
+  let nV = 0, nF = 0;
+  let VStorage, FStorage, t1Storage, t2Storage, nFStorage, neighborsStorage, transportStorage;
+  let faceAreasStorage, centroidsStorage;
+
+  init();
+
+  async function init() {
+
+    // renderer
+    renderer = new THREE.WebGPURenderer( { antialias: true } );
+    renderer.setPixelRatio( window.devicePixelRatio );
+    renderer.setSize( window.innerWidth, window.innerHeight );
+    renderer.setClearColor( '#000000' );
+    renderer.inspector = new Inspector();
+    document.body.appendChild( renderer.domElement );
+    await renderer.init();
+
+    // scene/camera
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera( 25, window.innerWidth / window.innerHeight, 0.01, 500 );
+    camera.position.set( 3, 4, 8 );
+
+    // lights (simple, stable)
+    scene.add( new THREE.AmbientLight( '#ffffff', 0.35 ) );
+    const dir = new THREE.DirectionalLight( '#ffffff', 1.5 );
+    dir.position.set( 4, 3, 2 );
+    scene.add( dir );
+
+    // controls
+    controls = new OrbitControls( camera, renderer.domElement );
+    controls.enableDamping = true;
+    controls.minDistance = 0.05;
+    controls.maxDistance = 200;
+
+    window.addEventListener( 'resize', onWindowResize );
+
+    // load mesh export (json+bin)
+    const exportData = await loadExportForThreeJS( DATA_BASE );
+    ({ nV, nF } = exportData.counts);
+
+    // build THREE.BufferGeometry for rendering the surface
+    const surfaceMesh = buildSurfaceMesh( exportData );
+    scene.add( surfaceMesh );
+
+    // center camera on mesh bounds
+    fitCameraToObject( camera, surfaceMesh, controls );
+
+    // create GPU storage nodes for compute and render
+    ({ VStorage, FStorage, t1Storage, t2Storage, nFStorage, neighborsStorage, transportStorage, faceAreasStorage, centroidsStorage } =
+      createStorageNodes( exportData )
+    );
+
+    // attractors + gizmos (same UX as original example)
+    const attractors = createAttractors();
+
+    // particles + compute
+    ({ updateCompute } = createSurfaceParticlesSystem( attractors ));
+
+    renderer.setAnimationLoop( animate );
+
+  }
+
+  // ============================================================
+  // Loading: exportForThreeJS JSON+BIN
+  // ============================================================
+  async function loadExportForThreeJS( basePath ) {
+
+    const json = await ( await fetch( basePath + '.json' ) ).json();
+    const bin  = await ( await fetch( basePath + '.bin' ) ).arrayBuffer();
+
+    const nV = json.nV;
+    const nF = json.nF;
+
+    // Helper: map dtype -> TypedArray constructor
+    const dtypeToCtor = ( dtype ) => {
+      switch ( dtype ) {
+        case 'float32': return Float32Array;
+        case 'uint32':  return Uint32Array;
+        case 'int32':   return Int32Array;
+        case 'uint8':   return Uint8Array;
+        default: throw new Error( `Unsupported dtype: ${dtype}` );
+      }
+    };
+
+    // Create typed arrays as views into the ArrayBuffer.
+    const buffers = {};
+    for ( const entry of json.buffers ) {
+      const Ctor = dtypeToCtor( entry.dtype );
+      buffers[ entry.name ] = new Ctor( bin, entry.byteOffset, entry.count );
+    }
+
+    // We will treat faceNeighbors as u32 in shaders (0xFFFFFFFF sentinel),
+    // even if stored as int32 in JSON. This is safe because it's bit-identical.
+    if ( buffers.faceNeighbors instanceof Int32Array ) {
+      buffers.faceNeighborsU32 = new Uint32Array(
+        buffers.faceNeighbors.buffer,
+        buffers.faceNeighbors.byteOffset,
+        buffers.faceNeighbors.length
+      );
+    } else {
+      buffers.faceNeighborsU32 = buffers.faceNeighbors;
+    }
+
+    // Sanity checks (minimal)
+    if ( !buffers.V || !buffers.F || !buffers.t1 || !buffers.t2 || !buffers.faceNormals || !buffers.faceNeighborsU32 || !buffers.transport2x2 ) {
+      console.warn( 'Buffers present:', Object.keys( buffers ) );
+      throw new Error( 'Missing required buffers. Expected at least: V, F, t1, t2, faceNormals, faceNeighbors, transport2x2.' );
+    }
+
+    return {
+      counts: { nV, nF },
+      buffers,
+      raw: { json, bin }
+    };
+
+  }
+
+  // ============================================================
+  // Surface mesh rendering
+  // ============================================================
+  function buildSurfaceMesh( exportData ) {
+
+    const { nV, nF } = exportData.counts;
+    const { buffers } = exportData;
+
+    const geom = new THREE.BufferGeometry();
+
+    // positions
+    const positions = buffers.V; // Float32Array length = nV*3
+    geom.setAttribute( 'position', new THREE.BufferAttribute( positions, 3 ) );
+
+    // indices
+    // F is flat [i0,i1,i2,...] length = nF*3 (already 0-based from exporter)
+    const indices = buffers.F;
+    geom.setIndex( new THREE.BufferAttribute( indices, 1 ) );
+
+    geom.computeVertexNormals();
+
+    const mat = new THREE.MeshStandardMaterial( {
+      color: 0x111111,
+      roughness: 0.9,
+      metalness: 0.0,
+      side: THREE.DoubleSide
+    } );
+
+    const mesh = new THREE.Mesh( geom, mat );
+    mesh.name = 'SurfaceMesh';
+
+    // Optionally: subtle wireframe overlay (comment in if you want)
+    // const wire = new THREE.LineSegments(
+    //   new THREE.WireframeGeometry( geom ),
+    //   new THREE.LineBasicMaterial( { color: 0x222222, transparent: true, opacity: 0.5 } )
+    // );
+    // mesh.add( wire );
+
+    return mesh;
+  }
+
+  function fitCameraToObject( camera, object, orbitControls ) {
+
+    object.updateWorldMatrix( true, true );
+    const box = new THREE.Box3().setFromObject( object );
+    const size = box.getSize( new THREE.Vector3() );
+    const center = box.getCenter( new THREE.Vector3() );
+
+    const maxSize = Math.max( size.x, size.y, size.z );
+    const fitHeightDistance = maxSize / ( 2 * Math.tan( THREE.MathUtils.degToRad( camera.fov * 0.5 ) ) );
+    const fitWidthDistance = fitHeightDistance / camera.aspect;
+    const distance = 1.25 * Math.max( fitHeightDistance, fitWidthDistance );
+
+    camera.position.copy( center ).add( new THREE.Vector3( 0, 0, distance ) );
+    camera.near = distance / 100;
+    camera.far = distance * 100;
+    camera.updateProjectionMatrix();
+
+    orbitControls.target.copy( center );
+    orbitControls.update();
+
+  }
+
+  // ============================================================
+  // Storage nodes from exported typed arrays
+  // ============================================================
+  function createStorageNodes( exportData ) {
+
+    const { nV, nF } = exportData.counts;
+    const b = exportData.buffers;
+
+    // Each StorageBufferAttribute is a GPU buffer. The storage() node makes it accessible in TSL.
+    // Docs: StorageBufferAttribute is intended for compute shaders and node-based pipelines. :contentReference[oaicite:3]{index=3}
+
+    const VAttr         = new THREE.StorageBufferAttribute( b.V, 3 );
+    const FAttr         = new THREE.StorageBufferAttribute( b.F, 3 );
+    const t1Attr        = new THREE.StorageBufferAttribute( b.t1, 3 );
+    const t2Attr        = new THREE.StorageBufferAttribute( b.t2, 3 );
+    const nFAttr        = new THREE.StorageBufferAttribute( b.faceNormals, 3 );
+    const neighborsAttr = new THREE.StorageBufferAttribute( b.faceNeighborsU32, 3 );
+    const transportAttr = new THREE.StorageBufferAttribute( b.transport2x2, 4 );
+
+    // Optional but useful (debug/spawn improvements)
+    const areasAttr     = b.faceAreas ? new THREE.StorageBufferAttribute( b.faceAreas, 1 ) : null;
+    const centroidsAttr = b.centroids ? new THREE.StorageBufferAttribute( b.centroids, 3 ) : null;
+
+    const VStorage         = storage( VAttr,         'vec3',  nV ).toVar( 'VStorage' );
+    const FStorage         = storage( FAttr,         'uvec3', nF ).toVar( 'FStorage' );
+    const t1Storage        = storage( t1Attr,        'vec3',  nF ).toVar( 't1Storage' );
+    const t2Storage        = storage( t2Attr,        'vec3',  nF ).toVar( 't2Storage' );
+    const nFStorage        = storage( nFAttr,        'vec3',  nF ).toVar( 'nFStorage' );
+    const neighborsStorage = storage( neighborsAttr, 'uvec3', nF ).toVar( 'neighborsStorage' );
+    const transportStorage = storage( transportAttr, 'vec4',  nF * 3 ).toVar( 'transportStorage' );
+
+    const faceAreasStorage = areasAttr ? storage( areasAttr, 'float', nF ).toVar( 'faceAreasStorage' ) : null;
+    const centroidsStorage = centroidsAttr ? storage( centroidsAttr, 'vec3',  nF ).toVar( 'centroidsStorage' ) : null;
+
+    return { VStorage, FStorage, t1Storage, t2Storage, nFStorage, neighborsStorage, transportStorage, faceAreasStorage, centroidsStorage };
+
+  }
+
+  // ============================================================
+  // Attractors: same UX pattern as reference example
+  // ============================================================
+  function createAttractors() {
+
+    const attractorsPositions = uniformArray( [
+      new THREE.Vector3( -1.0,  0.0,  0.0 ),
+      new THREE.Vector3(  1.0,  0.0, -0.6 ),
+      new THREE.Vector3(  0.0,  0.8,  1.0 )
+    ] );
+
+    const attractorsRotationAxes = uniformArray( [
+      new THREE.Vector3( 0, 1, 0 ),
+      new THREE.Vector3( 0, 1, 0 ),
+      new THREE.Vector3( 1, 0, -0.5 ).normalize()
+    ] );
+
+    const attractorsLength = uniform( attractorsPositions.array.length, 'uint' );
+
+    // Helpers + TransformControls
+    const attractors = [];
+    const helpersRingGeometry = new THREE.RingGeometry( 1, 1.02, 32, 1, 0, Math.PI * 1.5 );
+    const helpersArrowGeometry = new THREE.ConeGeometry( 0.1, 0.4, 12, 1, false );
+    const helpersMaterial = new THREE.MeshBasicMaterial( { side: THREE.DoubleSide, color: 0xaaaaaa } );
+
+    for ( let i = 0; i < attractorsPositions.array.length; i++ ) {
+
+      const attractor = {};
+      attractor.position = attractorsPositions.array[ i ];
+      attractor.orientation = attractorsRotationAxes.array[ i ];
+
+      attractor.reference = new THREE.Object3D();
+      attractor.reference.position.copy( attractor.position );
+      attractor.reference.quaternion.setFromUnitVectors( new THREE.Vector3( 0, 1, 0 ), attractor.orientation );
+      scene.add( attractor.reference );
+
+      attractor.helper = new THREE.Group();
+      attractor.helper.scale.setScalar( 0.325 );
+      attractor.reference.add( attractor.helper );
+
+      attractor.ring = new THREE.Mesh( helpersRingGeometry, helpersMaterial );
+      attractor.ring.rotation.x = - Math.PI * 0.5;
+      attractor.helper.add( attractor.ring );
+
+      attractor.arrow = new THREE.Mesh( helpersArrowGeometry, helpersMaterial );
+      attractor.arrow.position.x = 1;
+      attractor.arrow.position.z = 0.2;
+      attractor.arrow.rotation.x = Math.PI * 0.5;
+      attractor.helper.add( attractor.arrow );
+
+      attractor.controls = new TransformControls( camera, renderer.domElement );
+      attractor.controls.mode = 'translate';
+      attractor.controls.size = 0.5;
+      attractor.controls.attach( attractor.reference );
+      attractor.controls.visible = true;
+      attractor.controls.enabled = true;
+      scene.add( attractor.controls.getHelper() );
+
+      attractor.controls.addEventListener( 'dragging-changed', ( event ) => {
+        controls.enabled = ! event.value;
+      } );
+
+      attractor.controls.addEventListener( 'change', () => {
+        attractor.position.copy( attractor.reference.position );
+        attractor.orientation.copy(
+          new THREE.Vector3( 0, 1, 0 ).applyQuaternion( attractor.reference.quaternion )
+        );
+      } );
+
+      attractors.push( attractor );
+
+    }
+
+    return { attractors, attractorsPositions, attractorsRotationAxes, attractorsLength };
+
+  }
+
+  // ============================================================
+  // Particles: surface-constrained attractors (TSL compute)
+  // ============================================================
+  function createSurfaceParticlesSystem( attractorState ) {
+
+    const { attractorsPositions, attractorsRotationAxes, attractorsLength } = attractorState;
+
+    // --- parameters (mirrors reference demo, with surface integration)
+    const attractorMass        = uniform( Number( `1e7` ) );
+    const particleGlobalMass   = uniform( Number( `1e4` ) );
+    const timeScale            = uniform( 1.0 );
+    const spinningStrength     = uniform( 2.75 );
+    const maxSpeed             = uniform( 6.0 );   // surface units; tune per mesh scale
+    const velocityDamping      = uniform( 0.06 );
+    const gravityConstant      = 6.67e-11;
+
+    const scale                = uniform( 0.008 );
+    const colorA               = uniform( color( '#5900ff' ) );
+    const colorB               = uniform( color( '#ffa575' ) );
+
+    const nFacesU              = uniform( nF, 'uint' );
+
+    // --- per particle storage
+    const faceIdBuffer = instancedArray( PARTICLE_COUNT, 'uint' ); // u32
+    const baryBuffer   = instancedArray( PARTICLE_COUNT, 'vec3' ); // f32
+    const vel2Buffer   = instancedArray( PARTICLE_COUNT, 'vec2' ); // f32
+
+    // mass multiplier per particle (fixed pseudo-random)
+    const particleMassMultiplier = hash( instanceIndex.add( uint( Math.random() * 0xffffff ) ) )
+      .remap( 0.25, 1.0 )
+      .toVar();
+
+    const particleMass = particleMassMultiplier.mul( particleGlobalMass ).toVar();
+
+    // --- helper: random barycentric
+    const randomBarycentric = Fn( ( [ seed ] ) => {
+
+      // u,v uniform then fold into triangle
+      const u = hash( seed.add( uint( 0x1234 ) ) ).toVar();
+      const v = hash( seed.add( uint( 0x5678 ) ) ).toVar();
+
+      // fold if u+v > 1
+      const uu = u.toVar();
+      const vv = v.toVar();
+
+      If( uu.add( vv ).greaterThan( 1.0 ), () => {
+        uu.assign( uu.oneMinus() );
+        vv.assign( vv.oneMinus() );
+      } );
+
+      const b0 = uu.oneMinus().sub( vv );
+      const b1 = uu;
+      const b2 = vv;
+
+      return vec3( b0, b1, b2 );
+
+    } );
+
+    // --- helper: get triangle vertices for a face
+    const getFaceTri = Fn( ( [ fId ] ) => {
+      // FStorage element is uvec3 (i0,i1,i2)
+      const tri = FStorage.element( fId );
+      const i0 = tri.x.toVar();
+      const i1 = tri.y.toVar();
+      const i2 = tri.z.toVar();
+
+      const a = VStorage.element( i0 );
+      const b = VStorage.element( i1 );
+      const c = VStorage.element( i2 );
+
+      return vec4( 0 ); // placeholder (TSL needs a return; we'll inline usage instead)
+
+    } );
+
+    // --- helper: reconstruct position from (faceId, bary)
+    const faceBaryToPos = Fn( ( [ fId, bary ] ) => {
+      const tri = FStorage.element( fId );
+      const a = VStorage.element( tri.x );
+      const b = VStorage.element( tri.y );
+      const c = VStorage.element( tri.z );
+
+      return a.mul( bary.x ).add( b.mul( bary.y ) ).add( c.mul( bary.z ) );
+    } );
+
+    // --- helper: barycentric coords of point p in face f
+    const pointToBary = Fn( ( [ fId, p ] ) => {
+
+      const tri = FStorage.element( fId );
+      const a = VStorage.element( tri.x );
+      const b = VStorage.element( tri.y );
+      const c = VStorage.element( tri.z );
+
+      const v0 = b.sub( a );
+      const v1 = c.sub( a );
+      const v2 = p.sub( a );
+
+      const d00 = v0.dot( v0 );
+      const d01 = v0.dot( v1 );
+      const d11 = v1.dot( v1 );
+      const d20 = v2.dot( v0 );
+      const d21 = v2.dot( v1 );
+
+      const denom = d00.mul( d11 ).sub( d01.mul( d01 ) );
+      // v = (d11*d20 - d01*d21) / denom
+      const v = d11.mul( d20 ).sub( d01.mul( d21 ) ).div( denom );
+      // w = (d00*d21 - d01*d20) / denom
+      const w = d00.mul( d21 ).sub( d01.mul( d20 ) ).div( denom );
+      const u = float( 1.0 ).sub( v ).sub( w );
+
+      return vec3( u, v, w );
+    } );
+
+    // --- helper: pick edge index based on most-negative bary component
+    // Convention: if bary.x < 0 => crossed edge opposite vertex 0 => local edgeIndex 0, etc.
+    const pickEdgeIndex = Fn( ( [ bary ] ) => {
+
+      const bx = bary.x.toVar();
+      const by = bary.y.toVar();
+      const bz = bary.z.toVar();
+
+      const edge = uint( 0 ).toVar();
+
+      // find smallest component
+      If( by.lessThan( bx ).and( by.lessThan( bz ) ), () => {
+        edge.assign( uint( 1 ) );
+      } );
+
+      If( bz.lessThan( bx ).and( bz.lessThan( by ) ), () => {
+        edge.assign( uint( 2 ) );
+      } );
+
+      return edge;
+
+    } );
+
+    // --- helper: read neighbor face from faceNeighbors (uvec3); boundary sentinel = 0xFFFFFFFF
+    const getNeighborFace = Fn( ( [ fId, edgeIndex ] ) => {
+
+      const nb = neighborsStorage.element( fId ); // uvec3
+      const n0 = nb.x.toVar();
+      const n1 = nb.y.toVar();
+      const n2 = nb.z.toVar();
+
+      const out = uint( 0xffffffff ).toVar();
+
+      If( edgeIndex.equal( uint( 0 ) ), () => out.assign( n0 ) );
+      If( edgeIndex.equal( uint( 1 ) ), () => out.assign( n1 ) );
+      If( edgeIndex.equal( uint( 2 ) ), () => out.assign( n2 ) );
+
+      return out;
+
+    } );
+
+    // --- helper: apply transport2x2 (stored as vec4 per (face,edge))
+    // transportStorage index = faceId*3 + edgeIndex
+    const transportVel2 = Fn( ( [ fId, edgeIndex, v2 ] ) => {
+
+      const idx = fId.mul( uint( 3 ) ).add( edgeIndex );
+      const T = transportStorage.element( idx ); // vec4 = [T11,T12,T21,T22]
+
+      const x = v2.x;
+      const y = v2.y;
+
+      const nx = T.x.mul( x ).add( T.y.mul( y ) );
+      const ny = T.z.mul( x ).add( T.w.mul( y ) );
+
+      return vec2( nx, ny );
+
+    } );
+
+    // --- init compute (spawn particles)
+    const init = Fn( () => {
+
+      const fId = faceIdBuffer.element( instanceIndex );
+      const bary = baryBuffer.element( instanceIndex );
+      const v2 = vel2Buffer.element( instanceIndex );
+
+      // random face (uniform; area-weighted can be added later)
+      const rf = hash( instanceIndex.add( uint( Math.random() * 0xffffff ) ) ).mul( float( nF ) );
+      fId.assign( uint( rf ) ); // uint truncates fractional part :contentReference[oaicite:4]{index=4}
+
+      // random barycentric
+      bary.assign( randomBarycentric( instanceIndex ) );
+
+      // initial vel
+      const phi = hash( instanceIndex.add( uint( Math.random() * 0xffffff ) ) ).mul( PI ).mul( 2 );
+      const baseV = vec2( cos( phi ), sin( phi ) ).mul( 0.02 );
+      v2.assign( baseV );
+
+    } );
+
+    const initCompute = init().compute( PARTICLE_COUNT );
+
+    const reset = () => renderer.compute( initCompute );
+    reset();
+
+    // --- update compute
+    const update = Fn( () => {
+
+      const delta = float( FIXED_DELTA ).mul( timeScale ).toVar();
+
+      const fId = faceIdBuffer.element( instanceIndex );
+      const bary = baryBuffer.element( instanceIndex );
+      const v2 = vel2Buffer.element( instanceIndex );
+
+      // reconstruct 3D position
+      const pos = faceBaryToPos( fId, bary ).toVar();
+
+      // face frame
+      const t1 = t1Storage.element( fId );
+      const t2 = t2Storage.element( fId );
+      const n  = nFStorage.element( fId );
+
+      // ------------------------------------------------------------
+      // Force in 3D (gravity + spinning), like the reference demo
+      // ------------------------------------------------------------
+      const force3 = vec3( 0 ).toVar();
+
+      Loop( attractorsLength, ( { i } ) => {
+
+        const aPos = attractorsPositions.element( i );
+        const aAxis = attractorsRotationAxes.element( i );
+
+        const toA = aPos.sub( pos );
+        const dist = toA.length().add( 1e-6 );
+        const dir = toA.div( dist );
+
+        const gravityStrength =
+          attractorMass.mul( particleMass ).mul( gravityConstant ).div( dist.pow( 2 ) ).toVar();
+
+        force3.addAssign( dir.mul( gravityStrength ) );
+
+        // "spinning" term
+        const spinForce = aAxis.mul( gravityStrength ).mul( spinningStrength );
+        force3.addAssign( spinForce.cross( toA ) );
+
+      } );
+
+      // ------------------------------------------------------------
+      // Project to tangent plane, convert to face-local vel2
+      // ------------------------------------------------------------
+      const fN = n.normalize();
+      const forceTan = force3.sub( fN.mul( force3.dot( fN ) ) );
+
+      const dvx = forceTan.dot( t1 );
+      const dvy = forceTan.dot( t2 );
+
+      v2.addAssign( vec2( dvx, dvy ).mul( delta ) );
+
+      // clamp speed
+      const speed = v2.length().toVar();
+      If( speed.greaterThan( maxSpeed ), () => {
+        v2.assign( v2.div( speed ).mul( maxSpeed ) );
+      } );
+
+      // damping
+      v2.mulAssign( velocityDamping.oneMinus() );
+
+      // ------------------------------------------------------------
+      // Integrate on surface:
+      // dp = dt*(t1*v2.x + t2*v2.y)
+      // update pos, recompute bary, edge-cross up to MAX_EDGE_HOPS
+      // ------------------------------------------------------------
+      const dp = t1.mul( v2.x ).add( t2.mul( v2.y ) ).mul( delta );
+      const pNext = pos.add( dp ).toVar();
+
+      // attempt in current face
+      bary.assign( pointToBary( fId, pNext ) );
+
+      // edge-cross loop
+      Loop( uint( MAX_EDGE_HOPS_PER_STEP ), () => {
+
+        const bx = bary.x.toVar();
+        const by = bary.y.toVar();
+        const bz = bary.z.toVar();
+
+        const hasOutside =
+          bx.lessThan( 0.0 ).or( by.lessThan( 0.0 ) ).or( bz.lessThan( 0.0 ) );
+
+        If( hasOutside, () => {
+
+          const edgeIndex = pickEdgeIndex( bary );
+          const nbFace = getNeighborFace( fId, edgeIndex ).toVar();
+
+          // boundary => respawn
+          If( nbFace.equal( uint( 0xffffffff ) ), () => {
+
+            const seed = instanceIndex.add( uint( Math.random() * 0xffffff ) ).toVar();
+            const rf = hash( seed ).mul( float( nF ) );
+            fId.assign( uint( rf ) );
+            bary.assign( randomBarycentric( seed ) );
+            v2.assign( vec2( 0.0, 0.0 ) );
+
+          } );
+
+          // valid neighbor
+          If( nbFace.notEqual( uint( 0xffffffff ) ), () => {
+
+            // transport vel2 into neighbor frame
+            v2.assign( transportVel2( fId, edgeIndex, v2 ) );
+
+            // hop face
+            fId.assign( nbFace );
+
+            // recompute barycentric in neighbor face using same pNext
+            bary.assign( pointToBary( fId, pNext ) );
+
+          } );
+
+        } );
+
+      } );
+
+    } );
+
+    const updateCompute = update().compute( PARTICLE_COUNT ).setName( 'Update Surface Particles' );
+
+    // --- render material (sprite-like plane instancing)
+    const material = new THREE.SpriteNodeMaterial( { blending: THREE.AdditiveBlending, depthWrite: false } );
+
+    // position node: reconstruct from (faceId, bary) using the same mesh storage
+    material.positionNode = Fn( () => {
+      const fIdAttr = faceIdBuffer.toAttribute(); // uint
+      const baryAttr = baryBuffer.toAttribute();  // vec3
+      return faceBaryToPos( fIdAttr, baryAttr );
+    } )();
+
+    // color node: map speed to color
+    material.colorNode = Fn( () => {
+      const v2Attr = vel2Buffer.toAttribute(); // vec2
+      const sp = v2Attr.length();
+      const mixv = sp.div( maxSpeed ).smoothstep( 0.0, 0.6 );
+      const col = mix( colorA, colorB, mixv );
+      return vec4( col, 1.0 );
+    } )();
+
+    material.scaleNode = particleMassMultiplier.mul( scale );
+
+    const geom = new THREE.PlaneGeometry( 1, 1 );
+    const particles = new THREE.InstancedMesh( geom, material, PARTICLE_COUNT );
+    particles.frustumCulled = false;
+    particles.name = 'SurfaceParticles';
+    scene.add( particles );
+
+    // Simple inspector controls
+    const gui = renderer.inspector.createParameters( 'Surface Particles' );
+    gui.add( maxSpeed, 'value', 0.0, 20.0, 0.01 ).name( 'maxSpeed' );
+    gui.add( velocityDamping, 'value', 0.0, 0.2, 0.001 ).name( 'velocityDamping' );
+    gui.add( spinningStrength, 'value', 0.0, 10.0, 0.01 ).name( 'spinningStrength' );
+    gui.add( timeScale, 'value', 0.0, 3.0, 0.01 ).name( 'timeScale' );
+    gui.add( scale, 'value', 0.0, 0.05, 0.0005 ).name( 'particleScale' );
+    gui.add( { reset }, 'reset' );
+
+    // Attractor control mode toggle (translate / rotate / none)
+    gui.add( { controlsMode: 'translate' }, 'controlsMode', [ 'translate', 'rotate', 'none' ] ).onChange( value => {
+
+      for ( const a of attractorState.attractors ) {
+
+        if ( value === 'none' ) {
+          a.controls.visible = false;
+          a.controls.enabled = false;
+        } else {
+          a.controls.visible = true;
+          a.controls.enabled = true;
+          a.controls.mode = value;
+        }
+
+      }
+
+    } );
+
+    return { updateCompute };
+
+  }
+
+  // ============================================================
+  // Animate
+  // ============================================================
+  function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize( window.innerWidth, window.innerHeight );
+  }
+
+  async function animate() {
+    controls.update();
+    renderer.compute( updateCompute );
+    renderer.render( scene, camera );
+  }
+
+</script>
+</body>
+</html>

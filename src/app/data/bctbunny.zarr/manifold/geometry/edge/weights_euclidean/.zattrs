@@ -1,0 +1,1 @@
+{"name":"weights_euclidean","path":"geometry/edge/weights_euclidean","description":"Euclidean distance-based edge weights","shape":[42864,1],"dtype":"double","units":"m","support":"edge","computedBy":"bct.manifold.geometry.edge.weights"}

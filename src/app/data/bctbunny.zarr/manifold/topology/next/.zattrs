@@ -1,0 +1,1 @@
+{"name":"next","path":"topology/next","description":"Next halfedge around face (CCW)","shape":[85728,1],"dtype":"uint32","computedBy":"bct.manifold.topology.circulation"}

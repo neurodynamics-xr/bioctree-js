@@ -1,0 +1,10 @@
+{
+  "description": "Test scalar field: Gaussian2 (from f0)",
+  "type": "scalar",
+  "vertexCount": 163842,
+  "range": [
+    7.517114498959443E-7,
+    0.64063475449515017
+  ],
+  "data": "gaussian2_163842.bin"
+}

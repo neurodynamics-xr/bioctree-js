@@ -1,0 +1,1 @@
+{"format":"coo","shape":[14290,14290],"nnz":14290,"dtype":"double","name":"mass","path":"operator/mass","description":"FEM mass matrix (area-weighted inner product)","variant":"voronoi","symmetrize":true,"precision":"double","units":"area_units","storage":"sparse"}

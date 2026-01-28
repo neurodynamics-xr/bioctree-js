@@ -1,0 +1,1 @@
+{"format":"coo","shape":[28576,42864],"nnz":85728,"dtype":"double","name":"d1","path":"operator/dec/d1","description":"Exterior derivative d1: 1-forms → 2-forms (edge → face)","storage":"sparse"}

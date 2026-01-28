@@ -1,0 +1,1 @@
+{"name":"tailVertex","path":"topology/tailVertex","description":"Tail vertex index of each halfedge","shape":[85728,1],"dtype":"uint32","computedBy":"bct.manifold.topology.vertices"}

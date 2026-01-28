@@ -1,0 +1,149 @@
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+#root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: #000;
+}
+
+#canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+#hud {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 6px 8px;
+  color: #eaeaea;
+  font: 12px/1.3 Arial, sans-serif;
+  background: rgba(0,0,0,0.65);
+  border-radius: 6px;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#hudFileSelector {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  align-items: center;
+}
+
+#fileSelect {
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: Arial, sans-serif;
+  color: #eaeaea;
+  background: rgba(40, 40, 40, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 4px;
+  cursor: pointer;
+  flex: 1;
+}
+
+#fileSelect:hover {
+  background: rgba(50, 50, 50, 0.9);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+#btnLoad {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-family: Arial, sans-serif;
+  color: #eaeaea;
+  background: rgba(60, 120, 255, 0.8);
+  border: 1px solid rgba(100, 150, 255, 0.8);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+#btnLoad:hover {
+  background: rgba(80, 140, 255, 0.9);
+  border-color: rgba(120, 170, 255, 1);
+}
+
+#btnLoad:active {
+  transform: translateY(1px);
+}
+
+#hudText {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 250px;
+  pointer-events: none;
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+/* Loading overlay - modular loader system */
+.loaderOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 10;
+  opacity: 1;
+  transition: opacity 200ms ease;
+  pointer-events: auto;
+}
+
+.loaderOverlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#loaderHost {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Picker toolbar (bottom-center) */
+.pickerHUD {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 12px;
+  background: rgba(20, 20, 20, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  z-index: 40;
+  user-select: none;
+}
+
+.toolBtn {
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  color: #eaeaea;
+  font: 12px/1.2 system-ui, Segoe UI, Roboto, Arial, sans-serif;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.toolBtn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.toolBtn.active {
+  background: rgba(255, 255, 255, 0.20);
+  border-color: rgba(255, 255, 255, 0.25);
+}

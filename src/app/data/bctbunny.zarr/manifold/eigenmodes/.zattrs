@@ -1,0 +1,1 @@
+{"schema":"bct.manifold.eigen@1.0.0","package":"bct.manifold.eigen","numModes":500,"numVertices":14290,"operator":"Laplace-Beltrami","basis":"P1-FEM","ordering":"ascending","massType":"voronoi","removedDC":false}

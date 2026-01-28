@@ -1,0 +1,21 @@
+<!-- Plasma-2 Loader -->
+<svg width="0" height="0" aria-hidden="true" focusable="false">
+  <filter id="gooey-plasma-2">
+    <feGaussianBlur in="SourceGraphic" stdDeviation="20" result="blur"></feGaussianBlur>
+    <feColorMatrix in="blur" mode="matrix"
+      values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 50 -16"
+      result="goo"></feColorMatrix>
+    <feTurbulence baseFrequency="0.03" numOctaves="1"></feTurbulence>
+    <feDisplacementMap in="blur" scale="50" xChannelSelector="B" yChannelSelector="G"></feDisplacementMap>
+    <feBlend in="gooey" mode="overlay"></feBlend>
+  </filter>
+</svg>
+
+<div class="plasma-2">
+  <ul class="gooey-container">
+    <li class="bubble"></li><li class="bubble"></li><li class="bubble"></li>
+    <li class="bubble"></li><li class="bubble"></li><li class="bubble"></li>
+  </ul>
+</div>
+
+<div class="loader-text">Loading...</div>

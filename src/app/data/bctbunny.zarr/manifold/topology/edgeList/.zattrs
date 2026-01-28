@@ -1,0 +1,1 @@
+{"name":"edgeList","path":"topology/edgeList","description":"Undirected edge list (sorted vertex indices)","shape":[42864,2],"dtype":"uint32","computedBy":"bct.manifold.topology.edges"}

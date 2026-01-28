@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>three.js webgpu - Eulerian surface field particles</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0" />
+    <link type="text/css" rel="stylesheet" href="example.css" />
+  </head>
+  <body>
+    <div id="info">
+      <a href="https://threejs.org/" target="_blank" rel="noopener" class="logo-link"></a>
+      <div class="title-wrapper">
+        <a href="https://threejs.org/" target="_blank" rel="noopener">three.js</a><span>Eulerian Surface Flow</span>
+      </div>
+      <small>Particles constrained to triangles (faceId+bary) sampling exported U_face per face.</small>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "../build/three.webgpu.js",
+          "three/webgpu": "../build/three.webgpu.js",
+          "three/tsl": "../build/three.tsl.js",
+          "three/addons/": "./jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from 'three/webgpu';
+
+      import {
+        Fn, If, Loop,
+        float, uint,
+        vec3, vec4,
+        color, mix,
+        instancedArray, instanceIndex,
+        uniform, hash
+      } from 'three/tsl';
+
+      import { storage } from 'three/tsl';
+      import { Inspector } from 'three/addons/inspector/Inspector.js';
+      import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+      // -----------------------------
+      // CONFIG
+      // -----------------------------
+      const EXPORT_BASE = './data/threejs/particle_vis_eulerian'; // .json + .bin (relative to examples/)
+      const PARTICLE_COUNT = Math.pow( 2, 17 ); // 131072
+      const MAX_EDGE_HOPS = 4;
+
+      let camera, scene, renderer, controls;
+      let updateCompute;
+
+      init();
+
+      async function init() {
+
+        camera = new THREE.PerspectiveCamera( 25, window.innerWidth / window.innerHeight, 0.01, 500 );
+        camera.position.set( 0, 0, 5 );
+
+        scene = new THREE.Scene();
+
+        // Match the WebGPU example vibe: clean lighting
+        scene.add( new THREE.AmbientLight( 0xffffff, 0.5 ) );
+        const dir = new THREE.DirectionalLight( 0xffffff, 1.5 );
+        dir.position.set( 4, 2, 0 );
+        scene.add( dir );
+
+        renderer = new THREE.WebGPURenderer( { antialias: true } );
+        renderer.setPixelRatio( window.devicePixelRatio );
+        renderer.setSize( window.innerWidth, window.innerHeight );
+        renderer.setClearColor( 0x000000 );
+        renderer.inspector = new Inspector();
+        document.body.appendChild( renderer.domElement );
+
+        await renderer.init();
+
+        controls = new OrbitControls( camera, renderer.domElement );
+        controls.enableDamping = true;
+
+        window.addEventListener( 'resize', onWindowResize );
+
+        const exported = await loadExport( EXPORT_BASE );
+
+        const surface = buildSurfaceMesh( exported );
+        scene.add( surface );
+        fitCameraToObject( camera, surface, controls );
+
+        const gpu = createStorageNodes( exported );
+        updateCompute = createParticles( gpu, exported.counts.nF );
+
+        renderer.setAnimationLoop( animate );
+
+      }
+
+      // -----------------------------
+      // Load export: manifest + bin
+      // -----------------------------
+      async function loadExport( base ) {
+
+        const manifest = await ( await fetch( base + '.json' ) ).json();
+        const bin = await ( await fetch( base + '.bin' ) ).arrayBuffer();
+
+        const dtypeToCtor = ( dtype ) => {
+          switch ( dtype ) {
+            case 'float32': return Float32Array;
+            case 'uint32':  return Uint32Array;
+            case 'int32':   return Int32Array;
+            default: throw new Error( `Unsupported dtype: ${dtype}` );
+          }
+        };
+
+        const buffers = {};
+        for ( const entry of manifest.buffers ) {
+          const Ctor = dtypeToCtor( entry.dtype );
+          buffers[ entry.name ] = new Ctor( bin, entry.byteOffset, entry.count );
+        }
+
+        // REQUIRED buffers (match MATLAB exporter names exactly)
+        const required = [ 'V', 'F', 'faceNeighbors', 'U_face', 'vertexNormals', 'faceNormals', 'centroids' ];
+        for ( const k of required ) {
+          if ( !buffers[ k ] ) throw new Error( `Missing required buffer "${k}" in export.` );
+        }
+
+        // reinterpret faceNeighbors int32 as u32 for 0xFFFFFFFF boundary checks
+        buffers.faceNeighborsU32 = new Uint32Array(
+          buffers.faceNeighbors.buffer,
+          buffers.faceNeighbors.byteOffset,
+          buffers.faceNeighbors.length
+        );
+
+        return {
+          counts: { nV: manifest.nV, nF: manifest.nF },
+          buffers
+        };
+
+      }
+
+      // -----------------------------
+      // Build surface mesh (NO computations; uses exported vertexNormals)
+      // -----------------------------
+      function buildSurfaceMesh( exported ) {
+
+        const b = exported.buffers;
+
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute( 'position', new THREE.BufferAttribute( b.V, 3 ) );
+        geom.setAttribute( 'normal', new THREE.BufferAttribute( b.vertexNormals, 3 ) );
+        geom.setIndex( new THREE.BufferAttribute( b.F, 1 ) );
+
+        const mat = new THREE.MeshStandardMaterial( {
+          color: 0x111111,
+          roughness: 0.9,
+          metalness: 0.0,
+          side: THREE.DoubleSide
+        } );
+
+        const mesh = new THREE.Mesh( geom, mat );
+        mesh.name = 'SurfaceMesh';
+        return mesh;
+
+      }
+
+      function fitCameraToObject( camera, object, orbitControls ) {
+
+        object.updateWorldMatrix( true, true );
+        const box = new THREE.Box3().setFromObject( object );
+        const size = box.getSize( new THREE.Vector3() );
+        const center = box.getCenter( new THREE.Vector3() );
+
+        const maxSize = Math.max( size.x, size.y, size.z );
+        const fitHeightDistance = maxSize / ( 2 * Math.tan( THREE.MathUtils.degToRad( camera.fov * 0.5 ) ) );
+        const fitWidthDistance = fitHeightDistance / camera.aspect;
+        const distance = 1.25 * Math.max( fitHeightDistance, fitWidthDistance );
+
+        camera.position.copy( center ).add( new THREE.Vector3( 0, 0, distance ) );
+        camera.near = distance / 100;
+        camera.far = distance * 100;
+        camera.updateProjectionMatrix();
+
+        orbitControls.target.copy( center );
+        orbitControls.update();
+
+      }
+
+      // -----------------------------
+      // GPU storage nodes (mesh + field)
+      // -----------------------------
+      function createStorageNodes( exported ) {
+
+        const { nV, nF } = exported.counts;
+        const b = exported.buffers;
+
+        // StorageBufferAttribute(itemArray, itemSize)
+        const VAttr  = new THREE.StorageBufferAttribute( b.V, 3 );
+        const FAttr  = new THREE.StorageBufferAttribute( b.F, 3 );
+        const NbAttr = new THREE.StorageBufferAttribute( b.faceNeighborsU32, 3 );
+        const UAttr  = new THREE.StorageBufferAttribute( b.U_face, 3 );
+
+        const VStorage  = storage( VAttr, 'vec3', nV ).toVar( 'VStorage' );
+        const FStorage  = storage( FAttr, 'uvec3', nF ).toVar( 'FStorage' );
+        const NbStorage = storage( NbAttr, 'uvec3', nF ).toVar( 'NbStorage' );
+        const UStorage  = storage( UAttr, 'vec3', nF ).toVar( 'UStorage' );
+
+        return { VStorage, FStorage, NbStorage, UStorage };
+
+      }
+
+      // -----------------------------
+      // Particles: Eulerian sampling of U_face, constrained by faceNeighbors (opposite-vertex convention)
+      // -----------------------------
+      function createParticles( gpu, nF ) {
+
+        const { VStorage, FStorage, NbStorage, UStorage } = gpu;
+
+        // Controls (Inspector GUI)
+        const timeScale  = uniform( 1.0 );
+        const speedGain  = uniform( 1.0 );   // main knob: scales exported U_face
+        const maxSpeed   = uniform( 8.0 );   // clamp safety
+        const particleSz = uniform( 0.008 );
+
+        const colorA = uniform( color( '#5900ff' ) );
+        const colorB = uniform( color( '#ffa575' ) );
+
+        // Particle state buffers
+        const faceIdBuffer = instancedArray( PARTICLE_COUNT, 'uint' );
+        const baryBuffer   = instancedArray( PARTICLE_COUNT, 'vec3' );
+        const speedBuffer  = instancedArray( PARTICLE_COUNT, 'float' );
+
+        // --- Helpers ---
+        const faceBaryToPos = Fn( ( [ fId, bary ] ) => {
+          const tri = FStorage.element( fId ); // uvec3
+          const a = VStorage.element( tri.x );
+          const b = VStorage.element( tri.y );
+          const c = VStorage.element( tri.z );
+          return a.mul( bary.x ).add( b.mul( bary.y ) ).add( c.mul( bary.z ) );
+        } );
+
+        const randomBary = Fn( ( [ seed ] ) => {
+          const u = hash( seed.add( uint( 0x1234 ) ) ).toVar();
+          const v = hash( seed.add( uint( 0x5678 ) ) ).toVar();
+
+          const uu = u.toVar();
+          const vv = v.toVar();
+
+          If( uu.add( vv ).greaterThan( 1.0 ), () => {
+            uu.assign( uu.oneMinus() );
+            vv.assign( vv.oneMinus() );
+          } );
+
+          return vec3( uu.oneMinus().sub( vv ), uu, vv );
+        } );
+
+        const pointToBary = Fn( ( [ fId, p ] ) => {
+          const tri = FStorage.element( fId );
+          const a = VStorage.element( tri.x );
+          const b = VStorage.element( tri.y );
+          const c = VStorage.element( tri.z );
+
+          const v0 = b.sub( a );
+          const v1 = c.sub( a );
+          const v2 = p.sub( a );
+
+          const d00 = v0.dot( v0 );
+          const d01 = v0.dot( v1 );
+          const d11 = v1.dot( v1 );
+          const d20 = v2.dot( v0 );
+          const d21 = v2.dot( v1 );
+
+          const denom = d00.mul( d11 ).sub( d01.mul( d01 ) );
+          const v = d11.mul( d20 ).sub( d01.mul( d21 ) ).div( denom );
+          const w = d00.mul( d21 ).sub( d01.mul( d20 ) ).div( denom );
+          const u = float( 1.0 ).sub( v ).sub( w );
+
+          return vec3( u, v, w );
+        } );
+
+        // Pick edge by most negative bary component; neighbor table must be "opposite vertex" convention.
+        const pickEdge = Fn( ( [ bary ] ) => {
+          const edge = uint( 0 ).toVar();
+          If( bary.y.lessThan( bary.x ).and( bary.y.lessThan( bary.z ) ), () => edge.assign( uint( 1 ) ) );
+          If( bary.z.lessThan( bary.x ).and( bary.z.lessThan( bary.y ) ), () => edge.assign( uint( 2 ) ) );
+          return edge;
+        } );
+
+        const getNeighbor = Fn( ( [ fId, edgeIndex ] ) => {
+          const nb = NbStorage.element( fId ); // uvec3
+          const out = uint( 0xffffffff ).toVar();
+          If( edgeIndex.equal( uint( 0 ) ), () => out.assign( nb.x ) );
+          If( edgeIndex.equal( uint( 1 ) ), () => out.assign( nb.y ) );
+          If( edgeIndex.equal( uint( 2 ) ), () => out.assign( nb.z ) );
+          return out;
+        } );
+
+        // --- Init compute ---
+        const init = Fn( () => {
+          const fId = faceIdBuffer.element( instanceIndex );
+          const bary = baryBuffer.element( instanceIndex );
+          const spd = speedBuffer.element( instanceIndex );
+
+          const rFace = hash( instanceIndex.add( uint( 0x9e3779b9 ) ) ).mul( float( nF ) );
+          fId.assign( uint( rFace ) );
+          bary.assign( randomBary( instanceIndex ) );
+          spd.assign( float( 0.0 ) );
+        } );
+
+        const initCompute = init().compute( PARTICLE_COUNT );
+        const reset = () => renderer.compute( initCompute );
+        reset();
+
+        // --- Update compute ---
+        const update = Fn( () => {
+
+          const dt = float( 1.0 / 60.0 ).mul( timeScale ).toVar();
+
+          const fId = faceIdBuffer.element( instanceIndex );
+          const bary = baryBuffer.element( instanceIndex );
+          const spd = speedBuffer.element( instanceIndex );
+
+          const pos = faceBaryToPos( fId, bary ).toVar();
+
+          let u = UStorage.element( fId ).mul( speedGain ).toVar();
+
+          const s = u.length().toVar();
+          If( s.greaterThan( maxSpeed ), () => {
+            u.assign( u.normalize().mul( maxSpeed ) );
+          } );
+
+          spd.assign( u.length() );
+
+          const pNext = pos.add( u.mul( dt ) ).toVar();
+
+          bary.assign( pointToBary( fId, pNext ) );
+
+          Loop( uint( MAX_EDGE_HOPS ), () => {
+
+            const outside =
+              bary.x.lessThan( 0.0 )
+                .or( bary.y.lessThan( 0.0 ) )
+                .or( bary.z.lessThan( 0.0 ) );
+
+            If( outside, () => {
+
+              const e = pickEdge( bary );
+              const nbFace = getNeighbor( fId, e ).toVar();
+
+              // Boundary => respawn
+              If( nbFace.equal( uint( 0xffffffff ) ), () => {
+
+                const rFace2 = hash( instanceIndex.add( uint( 0x7f4a7c15 ) ) ).mul( float( nF ) );
+                fId.assign( uint( rFace2 ) );
+                bary.assign( randomBary( instanceIndex.add( uint( 1337 ) ) ) );
+                spd.assign( float( 0.0 ) );
+
+              } );
+
+              // Neighbor => hop and recompute bary
+              If( nbFace.notEqual( uint( 0xffffffff ) ), () => {
+
+                fId.assign( nbFace );
+                bary.assign( pointToBary( fId, pNext ) );
+
+              } );
+
+            } );
+
+          } );
+
+        } );
+
+        const updateCompute = update().compute( PARTICLE_COUNT ).setName( 'Update Eulerian Surface Particles' );
+
+        // --- Render material (two-color, additive, billboard) ---
+        const material = new THREE.SpriteNodeMaterial( {
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        } );
+
+        material.positionNode = Fn( () => {
+          const fIdAttr = faceIdBuffer.toAttribute();
+          const baryAttr = baryBuffer.toAttribute();
+          return faceBaryToPos( fIdAttr, baryAttr );
+        } )();
+
+        material.colorNode = Fn( () => {
+          const sAttr = speedBuffer.toAttribute();
+          const mixv = sAttr.div( maxSpeed ).smoothstep( 0.0, 0.5 );
+          const c = mix( colorA, colorB, mixv );
+          return vec4( c, 1.0 );
+        } )();
+
+        material.scaleNode = particleSz;
+
+        const geom = new THREE.PlaneGeometry( 1, 1 );
+        const particles = new THREE.InstancedMesh( geom, material, PARTICLE_COUNT );
+        particles.frustumCulled = false;
+        scene.add( particles );
+
+        // Inspector UI
+        const gui = renderer.inspector.createParameters( 'Parameters' );
+        gui.add( timeScale, 'value', 0, 5, 0.01 ).name( 'timeScale' );
+        gui.add( speedGain, 'value', 0, 10, 0.01 ).name( 'speedGain' );
+        gui.add( maxSpeed, 'value', 0, 20, 0.01 ).name( 'maxSpeed' );
+        gui.add( particleSz, 'value', 0, 0.05, 0.001 ).name( 'particleSize' );
+        gui.add( { reset }, 'reset' );
+
+        return updateCompute;
+
+      }
+
+      // -----------------------------
+      // Animate
+      // -----------------------------
+      function animate() {
+        controls.update();
+        renderer.compute( updateCompute );
+        renderer.render( scene, camera );
+      }
+
+      function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize( window.innerWidth, window.innerHeight );
+      }
+    </script>
+  </body>
+</html>

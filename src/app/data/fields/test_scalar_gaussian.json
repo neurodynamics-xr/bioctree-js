@@ -1,0 +1,10 @@
+{
+  "description": "Test scalar field: Gaussian bump (peak at vertex 0)",
+  "type": "scalar",
+  "vertexCount": 163842,
+  "range": [
+    0,
+    1
+  ],
+  "data": "gaussian_163842.bin"
+}

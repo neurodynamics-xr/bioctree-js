@@ -1,0 +1,1 @@
+{"name":"edge","path":"topology/edge","description":"Undirected edge index for each halfedge","shape":[85728,1],"dtype":"uint32","computedBy":"bct.manifold.topology.edgeIndices"}

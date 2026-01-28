@@ -1,0 +1,1 @@
+{"name":"areas","path":"geometry/face/areas","description":"Area of each triangular face","shape":[28576,1],"dtype":"double","units":"m^2","support":"face","computedBy":"bct.manifold.geometry.face.areas"}

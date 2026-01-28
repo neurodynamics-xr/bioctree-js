@@ -1,0 +1,1 @@
+{"schema":"bct.manifold.geometry.face@1.0.0","package":"bct.manifold.geometry.face","frame_handedness":"right-handed","frame_convention":"tangent2 = normal × tangent1","precision":"double","circumcenterMethod":"native","computed_utc":"2026-01-23T01:35:24Z"}

@@ -1,0 +1,1 @@
+{"name":"eigenvectors","path":"eigen/eigenvectors","description":"Eigenvectors (modes) of Laplace-Beltrami operator (M-orthonormal)","shape":[14290,500],"dtype":"float64","orthonormality":"mass-weighted"}
